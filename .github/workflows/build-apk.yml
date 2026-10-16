@@ -18,17 +18,15 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Gradle & Generate Wrapper
+      - name: Setup Gradle 8.5
         run: |
-          sudo apt-get update && sudo apt-get install -y gradle
+          wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
+          unzip -q gradle-8.5-bin.zip
+          echo "$GITHUB_WORKSPACE/gradle-8.5/bin" >> $GITHUB_PATH
+
+      - name: Generate Wrapper & Build APK
+        run: |
           gradle wrapper --gradle-version 8.5
-          chmod +x gradlew
-
-      - name: Build Self-Signed Release APK
-        run: |
           ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Upload Direct-Install APK Artifact
