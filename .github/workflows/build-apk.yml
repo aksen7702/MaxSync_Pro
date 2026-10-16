@@ -18,11 +18,17 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.5
 
       - name: Build Self-Signed Release APK
-        run: gradle assembleRelease --no-daemon
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace
 
       - name: Upload Direct-Install APK Artifact
         uses: actions/upload-artifact@v4
