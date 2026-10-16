@@ -40,7 +40,7 @@ android {
 
 dependencies {
     // FFmpegKit Android (EBU R128 측정 및 libmp3lame 인코딩 내장)
-    implementation("com.arthenica:ffmpeg-kit-audio:6.0-2")
+    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.7")
 
     // Jetpack Compose & Material 3
     implementation(platform("androidx.compose:compose-bom:2024.02.01"))
