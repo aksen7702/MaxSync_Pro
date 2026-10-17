@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,6 +36,18 @@ jobs:
           name: MaxSync-Pro-APK
           path: app/build/outputs/apk/release/*.apk
           retention-days: 7
+
+      # APK를 Release에 올려서 로그인 없이 핸드폰에서 바로 다운로드할 수 있게 합니다.
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: MaxSync Pro - Latest Build
+          body: |
+            GitHub Actions에서 빌드된 최신 APK입니다.
+            핸드폰에서 아래 파일을 다운로드 후 설치하세요.
+          files: app/build/outputs/apk/release/*.apk
+          overwrite_files: true
 
   # 로컬 빌드를 위해 gradle-wrapper.jar 파일을 만들어주는 작업입니다.
   # 실행 후 Artifacts에서 wrapper.zip을 다운로드해 프로젝트 루트에 압축 해제하세요.
