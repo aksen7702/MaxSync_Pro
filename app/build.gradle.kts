@@ -11,12 +11,12 @@ android {
         applicationId = "com.maxsync.pro"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary = true
+        ndk {
+            // 실제 스마트폰에서 구동되는 핵심 아키텍처만 압축하여 파일 전송 및 크래시 방지
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
         }
     }
 
@@ -25,9 +25,6 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
-        }
-        debug {
-            isMinifyEnabled = false
         }
     }
 
@@ -49,9 +46,6 @@ android {
     }
 
     packaging {
-        jniLibs {
-            useLegacyPackaging = true
-        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
@@ -68,12 +62,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     
-    // 유지보수되는 공식 FFmpegKit 오디오 패키지
+    // 가장 가볍고 안정적인 공식 경량 오디오 엔진
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.7")
-    
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2023.10.01"))
-    androidTestImplementation("androidx.compose.ui:ui-test-manifest")
 }
