@@ -2,10 +2,12 @@ package com.maxsyncpro.mobile
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.widget.Toast
@@ -53,7 +55,9 @@ data class AudioTrackItem(
     var needsBoost: Boolean = false,
     var isReference: Boolean = false,
     var status: String = "대기중",
-    var isDone: Boolean = false
+    var isDone: Boolean = false,
+    // 폴더로 추가한 경우, 출력 파일을 저장할 SAF 트리 URI (같은 폴더의 output 하위폴더에 저장)
+    val outputTreeUri: Uri? = null
 )
 
 // LUFS 측정 결과 (error가 null이 아니면 측정 실패)
@@ -126,6 +130,17 @@ fun MaxSyncProAppView() {
         }
     }
 
+    fun addItems(newItems: List<AudioTrackItem>) {
+        val existing = tracks.map { it.uri.toString() }.toSet()
+        val filtered = newItems.filter { it.uri.toString() !in existing }
+        if (filtered.isEmpty()) {
+            progressText = "추가된 곡이 없습니다 (이미 목록에 있거나 오디오 파일 아님)"
+            return
+        }
+        tracks = recalcTargets(tracks + filtered, thresholdLu)
+        progressText = "${tracks.size}곡 목록 등록 완료"
+    }
+
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
@@ -139,8 +154,27 @@ fun MaxSyncProAppView() {
                     sizeMb = meta.second
                 )
             }
-            tracks = recalcTargets(tracks + newItems, thresholdLu)
-            progressText = "${tracks.size}곡 목록 등록 완료"
+            addItems(newItems)
+        }
+    }
+
+    val folderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            progressText = "폴더 스캔 중..."
+            val found = scanFolderForAudio(context, treeUri)
+            if (found.isEmpty()) {
+                progressText = "선택한 폴더에 오디오 파일이 없습니다."
+            } else {
+                addItems(found)
+            }
         }
     }
 
@@ -212,16 +246,28 @@ fun MaxSyncProAppView() {
         // 추가 & 초기화
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Button(
                 onClick = { filePicker.launch(arrayOf("audio/*")) },
                 enabled = !isProcessing,
                 modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
             ) {
-                Text("+ 오디오 파일 추가", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text("+ 파일 추가", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+
+            Button(
+                onClick = { folderPicker.launch(null) },
+                enabled = !isProcessing,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0891B2))
+            ) {
+                Text("+ 폴더 추가", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             }
 
             OutlinedButton(
@@ -231,6 +277,8 @@ fun MaxSyncProAppView() {
                     progressText = "목록이 초기화되었습니다."
                 },
                 enabled = !isProcessing && tracks.isNotEmpty(),
+                modifier = Modifier.weight(0.7f),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text("비우기", color = Color(0xFFF87171), fontSize = 12.sp)
@@ -292,7 +340,7 @@ fun MaxSyncProAppView() {
                             val itm = copyList[i]
                             if (itm.needsBoost && itm.gainDb > 0) {
                                 progressText = "증폭 인코딩 중: ${itm.name} (+${String.format(Locale.US, "%.1f", itm.gainDb)}dB)"
-                                val err = boostAndSaveTrack(context, itm.uri, itm.name, itm.gainDb, selectedBitrate)
+                                val err = boostAndSaveTrack(context, itm.uri, itm.name, itm.gainDb, selectedBitrate, itm.outputTreeUri)
                                 if (err == null) {
                                     done++
                                     copyList[i] = itm.copy(
@@ -545,7 +593,8 @@ suspend fun boostAndSaveTrack(
     uri: Uri,
     name: String,
     gainDb: Double,
-    bitrate: String
+    bitrate: String,
+    outputTreeUri: Uri? = null
 ): String? = withContext(Dispatchers.IO) {
     val tempIn = File(context.cacheDir, "in_${System.currentTimeMillis()}.mp3")
     val tempOut = File(context.cacheDir, "out_${System.currentTimeMillis()}.mp3")
@@ -559,8 +608,15 @@ suspend fun boostAndSaveTrack(
         val session = FFmpegKit.execute(cmd)
 
         if (session.returnCode.isValueSuccess && tempOut.exists()) {
-            saveToMusicStorage(context, tempOut, "MaxSync_$name")
-            null
+            // 원본 파일명을 그대로 유지하며 저장
+            val saved = if (outputTreeUri != null) {
+                // 폴더로 추가한 경우: 같은 폴더의 output 하위폴더에 저장
+                saveToTreeOutput(context, tempOut, name, outputTreeUri)
+            } else {
+                // 개별 파일로 추가한 경우: 기본 저장소(Music/MaxSync_Output)에 저장
+                saveToMusicStorage(context, tempOut, name)
+            }
+            if (saved) null else "저장 실패 (권한 또는 경로 확인 필요)"
         } else {
             val tail = (session.allLogsAsString ?: "").trim().lines().takeLast(2).joinToString(" / ")
             "인코딩 실패 (code=${session.returnCode}): $tail"
@@ -573,24 +629,167 @@ suspend fun boostAndSaveTrack(
     }
 }
 
-fun saveToMusicStorage(context: Context, sourceFile: File, displayName: String) {
-    val values = ContentValues().apply {
-        put(MediaStore.Audio.Media.DISPLAY_NAME, displayName)
-        put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/MaxSync_Output")
-            put(MediaStore.Audio.Media.IS_PENDING, 1)
+// SAF 트리(폴더) 안에 "output" 하위폴더를 찾거나 생성한 뒤, 원본 파일명 그대로 저장
+fun saveToTreeOutput(context: Context, sourceFile: File, displayName: String, treeUri: Uri): Boolean {
+    return try {
+        val resolver = context.contentResolver
+        val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
+        val outputDirId = findOrCreateDir(context, treeUri, rootDocId, "output") ?: return false
+
+        // 같은 이름의 기존 파일이 있으면 먼저 삭제 (파일명이 바뀌지 않도록)
+        deleteChildIfExists(context, treeUri, outputDirId, displayName)
+
+        val outputDirUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, outputDirId)
+        val newUri = DocumentsContract.createDocument(
+            resolver, outputDirUri, guessAudioMime(displayName), displayName
+        ) ?: return false
+
+        resolver.openOutputStream(newUri)?.use { out ->
+            FileInputStream(sourceFile).use { inp -> inp.copyTo(out) }
         }
+        true
+    } catch (e: Exception) {
+        false
     }
+}
 
-    val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values) ?: return
-    context.contentResolver.openOutputStream(uri)?.use { out ->
-        FileInputStream(sourceFile).use { inp -> inp.copyTo(out) }
+// SAF 폴더에서 이름이 일치하는 디렉토리의 documentId를 찾고, 없으면 생성
+fun findOrCreateDir(context: Context, treeUri: Uri, parentDocId: String, dirName: String): String? {
+    try {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        context.contentResolver.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
+            ),
+            null, null, null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(1)
+                val mime = c.getString(2)
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR && name == dirName) {
+                    return c.getString(0)
+                }
+            }
+        }
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocId)
+        val created = DocumentsContract.createDocument(
+            context.contentResolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, dirName
+        ) ?: return null
+        return DocumentsContract.getDocumentId(created)
+    } catch (e: Exception) {
+        return null
     }
+}
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        values.clear()
-        values.put(MediaStore.Audio.Media.IS_PENDING, 0)
-        context.contentResolver.update(uri, values, null, null)
+// SAF 폴더에서 동일한 이름의 파일이 있으면 삭제
+fun deleteChildIfExists(context: Context, treeUri: Uri, parentDocId: String, displayName: String) {
+    try {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        context.contentResolver.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME
+            ),
+            null, null, null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                if (c.getString(1) == displayName) {
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, c.getString(0))
+                    DocumentsContract.deleteDocument(context.contentResolver, childUri)
+                    return
+                }
+            }
+        }
+    } catch (_: Exception) {}
+}
+
+// 선택한 SAF 폴더 바로 아래의 오디오 파일들을 수집 (하위폴더는 제외)
+fun scanFolderForAudio(context: Context, treeUri: Uri): List<AudioTrackItem> {
+    val result = mutableListOf<AudioTrackItem>()
+    try {
+        val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, rootDocId)
+        context.contentResolver.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE
+            ),
+            null, null, null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val docId = c.getString(0) ?: continue
+                val name = c.getString(1) ?: continue
+                val mime = c.getString(2) ?: ""
+                val size = if (c.isNull(3)) 0L else c.getLong(3)
+                if (mime.startsWith("audio/") || isAudioName(name)) {
+                    val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    result.add(
+                        AudioTrackItem(
+                            id = "f_${docId}",
+                            uri = docUri,
+                            name = name,
+                            sizeMb = String.format(Locale.US, "%.1f", size / (1024.0 * 1024.0)),
+                            outputTreeUri = treeUri
+                        )
+                    )
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    return result
+}
+
+fun isAudioName(name: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+    return ext in setOf(
+        "mp3", "m4a", "m4b", "aac", "wav", "flac", "ogg", "opus",
+        "wma", "amr", "aiff", "aif", "ape", "wv", "mka"
+    )
+}
+
+fun guessAudioMime(name: String): String {
+    val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+    return when (ext) {
+        "mp3" -> "audio/mpeg"
+        "m4a", "m4b", "aac" -> "audio/mp4"
+        "wav" -> "audio/x-wav"
+        "flac" -> "audio/flac"
+        "ogg", "opus" -> "audio/ogg"
+        "wma" -> "audio/x-ms-wma"
+        else -> "audio/mpeg"
+    }
+}
+
+fun saveToMusicStorage(context: Context, sourceFile: File, displayName: String): Boolean {
+    return try {
+        val values = ContentValues().apply {
+            put(MediaStore.Audio.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/MaxSync_Output")
+                put(MediaStore.Audio.Media.IS_PENDING, 1)
+            }
+        }
+
+        val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+        context.contentResolver.openOutputStream(uri)?.use { out ->
+            FileInputStream(sourceFile).use { inp -> inp.copyTo(out) }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.clear()
+            values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+            context.contentResolver.update(uri, values, null, null)
+        }
+        true
+    } catch (e: Exception) {
+        false
     }
 }
