@@ -285,7 +285,7 @@ fun MaxSyncProAppView() {
                                 tracks = copyList.toList()
                             }
                         }
-                        progressText = "일괄 증폭 완료! ($done곡 내장메모리 Music/MaxSync_Output 저장됨)"
+                        progressText = "일괄 증폭 완료! (${done}곡 내장메모리 Music/MaxSync_Output 저장됨)"
                         isProcessing = false
                     }
                 },
