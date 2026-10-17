@@ -1,4 +1,4 @@
-package com.maxsync.pro
+package com.maxsyncpro.mobile
 
 import android.content.ContentValues
 import android.content.Context
@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFmpegKitConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,6 +60,10 @@ data class AudioTrackItem(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // FFmpegKit 네이티브 라이브러리 초기화 (앱 시작 시 1회 필수)
+        FFmpegKitConfig.initialize(this)
+
         try {
             setContent {
                 MaterialTheme(
@@ -477,7 +482,9 @@ suspend fun measureLufs(context: Context, uri: Uri): Pair<Double, Double> = with
         context.contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(temp).use { output -> input.copyTo(output) }
         }
-        val cmd = "-i \"${temp.absolutePath}\" -filter_complex ebur128=peak=true -f null -"
+
+        // FFmpegKit 세션 실행
+        val cmd = "-i \"${temp.absolutePath}\" -af ebur128=peak=true -f null -"
         val session = FFmpegKit.execute(cmd)
         val logs = session.allLogsAsString ?: ""
 
@@ -488,6 +495,7 @@ suspend fun measureLufs(context: Context, uri: Uri): Pair<Double, Double> = with
         val peak = tpRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -1.0
         Pair(lufs, peak)
     } catch (e: Exception) {
+        // FFmpegKit 오류 시 기본값 반환 (앱 크래시 방지)
         Pair(-16.0, -1.0)
     } finally {
         temp.delete()

@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.maxsync.pro"
+    namespace = "com.maxsyncpro.mobile"
     compileSdk = 34
 
     defaultConfig {
