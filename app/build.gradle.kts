@@ -69,4 +69,7 @@ dependencies {
     
     // 가장 가볍고 안정적인 공식 경량 오디오 엔진
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.7")
+
+    // ffmpeg-kit-audio:8.1.7 POM에 의존성 선언이 누락되어 있어 수동 추가 (누락 시 NoClassDefFoundError 발생)
+    implementation("com.arthenica:smart-exception-java:0.2.1")
 }
