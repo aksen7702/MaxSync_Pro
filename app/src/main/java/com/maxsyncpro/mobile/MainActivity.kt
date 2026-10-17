@@ -34,7 +34,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFmpegKitConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,12 +56,12 @@ data class AudioTrackItem(
     var isDone: Boolean = false
 )
 
+// LUFS 측정 결과 (error가 null이 아니면 측정 실패)
+data class LufsResult(val lufs: Double, val peak: Double, val error: String? = null)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // FFmpegKit 네이티브 라이브러리 초기화 (앱 시작 시 1회 필수)
-        FFmpegKitConfig.initialize(this)
 
         try {
             setContent {
@@ -249,7 +248,12 @@ fun MaxSyncProAppView() {
                             tracks = copyList.toList()
 
                             val result = measureLufs(context, copyList[i].uri)
-                            copyList[i] = copyList[i].copy(lufs = result.first, peak = result.second)
+                            if (result.error != null) {
+                                progressText = "측정 오류: ${result.error}"
+                                copyList[i] = copyList[i].copy(status = "오류")
+                            } else {
+                                copyList[i] = copyList[i].copy(lufs = result.lufs, peak = result.peak)
+                            }
                             tracks = recalcTargets(copyList.toList(), thresholdLu)
                         }
                         progressText = "측정 완료! 최고 음량에 맞춰 대상이 지정되었습니다."
@@ -274,8 +278,8 @@ fun MaxSyncProAppView() {
                             val itm = copyList[i]
                             if (itm.needsBoost && itm.gainDb > 0) {
                                 progressText = "증폭 인코딩 중: ${itm.name} (+${String.format(Locale.US, "%.1f", itm.gainDb)}dB)"
-                                val ok = boostAndSaveTrack(context, itm.uri, itm.name, itm.gainDb, selectedBitrate)
-                                if (ok) {
+                                val err = boostAndSaveTrack(context, itm.uri, itm.name, itm.gainDb, selectedBitrate)
+                                if (err == null) {
                                     done++
                                     copyList[i] = itm.copy(
                                         lufs = targetLufs,
@@ -285,6 +289,7 @@ fun MaxSyncProAppView() {
                                         isDone = true
                                     )
                                 } else {
+                                    progressText = "증폭 오류: $err"
                                     copyList[i] = itm.copy(status = "오류")
                                 }
                                 tracks = copyList.toList()
@@ -476,14 +481,13 @@ fun getFileMeta(context: Context, uri: Uri): Pair<String, String> {
     return Pair(name, sizeStr)
 }
 
-suspend fun measureLufs(context: Context, uri: Uri): Pair<Double, Double> = withContext(Dispatchers.IO) {
+suspend fun measureLufs(context: Context, uri: Uri): LufsResult = withContext(Dispatchers.IO) {
     val temp = File(context.cacheDir, "meas_${System.currentTimeMillis()}.mp3")
     try {
         context.contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(temp).use { output -> input.copyTo(output) }
         }
 
-        // FFmpegKit 세션 실행
         val cmd = "-i \"${temp.absolutePath}\" -af ebur128=peak=true -f null -"
         val session = FFmpegKit.execute(cmd)
         val logs = session.allLogsAsString ?: ""
@@ -491,12 +495,18 @@ suspend fun measureLufs(context: Context, uri: Uri): Pair<Double, Double> = with
         val iRegex = Regex("""I:\s*(-?\d+(\.\d+)?)\s*LUFS""")
         val tpRegex = Regex("""Peak:\s*(-?\d+(\.\d+)?)\s*dBFS""")
 
-        val lufs = iRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -16.0
-        val peak = tpRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -1.0
-        Pair(lufs, peak)
-    } catch (e: Exception) {
-        // FFmpegKit 오류 시 기본값 반환 (앱 크래시 방지)
-        Pair(-16.0, -1.0)
+        val lufs = iRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull()
+        val peak = tpRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull()
+
+        if (lufs == null) {
+            val tail = logs.trim().lines().takeLast(3).joinToString(" / ")
+            LufsResult(-16.0, peak ?: -1.0, if (tail.isBlank()) "LUFS 값을 읽지 못했습니다 (code=${session.returnCode})" else tail)
+        } else {
+            LufsResult(lufs, peak ?: -1.0)
+        }
+    } catch (t: Throwable) {
+        // FFmpegKit는 네이티브 로딩 실패 시 java.lang.Error를 던지므로 Throwable로 잡아야 크래시를 막을 수 있음
+        LufsResult(-16.0, -1.0, "${t.javaClass.simpleName}: ${t.message}")
     } finally {
         temp.delete()
     }
@@ -508,7 +518,7 @@ suspend fun boostAndSaveTrack(
     name: String,
     gainDb: Double,
     bitrate: String
-): Boolean = withContext(Dispatchers.IO) {
+): String? = withContext(Dispatchers.IO) {
     val tempIn = File(context.cacheDir, "in_${System.currentTimeMillis()}.mp3")
     val tempOut = File(context.cacheDir, "out_${System.currentTimeMillis()}.mp3")
     try {
@@ -522,12 +532,13 @@ suspend fun boostAndSaveTrack(
 
         if (session.returnCode.isValueSuccess && tempOut.exists()) {
             saveToMusicStorage(context, tempOut, "MaxSync_$name")
-            true
+            null
         } else {
-            false
+            val tail = (session.allLogsAsString ?: "").trim().lines().takeLast(2).joinToString(" / ")
+            "인코딩 실패 (code=${session.returnCode}): $tail"
         }
-    } catch (e: Exception) {
-        false
+    } catch (t: Throwable) {
+        "${t.javaClass.simpleName}: ${t.message}"
     } finally {
         tempIn.delete()
         tempOut.delete()

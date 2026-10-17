@@ -15,8 +15,9 @@ android {
         versionName = "1.0.1"
 
         ndk {
-            // 실제 스마트폰에서 구동되는 핵심 아키텍처만 압축하여 파일 전송 및 크래시 방지
-            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+            // ffmpeg-kit-maintained 라이브러리가 배포하는 ABI와 일치시킴 (arm64-v8a, x86_64)
+            // 실제 스마트폰(arm64) + 에뮬레이터(x86_64) 지원
+            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
         }
     }
 
