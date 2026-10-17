@@ -242,6 +242,8 @@ fun MaxSyncProAppView() {
                     scope.launch {
                         isProcessing = true
                         val copyList = tracks.toMutableList()
+                        var errCount = 0
+                        var lastErr: String? = null
                         for (i in copyList.indices) {
                             progressText = "음량 측정 중 (${i + 1}/${copyList.size}): ${copyList[i].name}"
                             copyList[i] = copyList[i].copy(status = "측정중...")
@@ -249,14 +251,19 @@ fun MaxSyncProAppView() {
 
                             val result = measureLufs(context, copyList[i].uri)
                             if (result.error != null) {
-                                progressText = "측정 오류: ${result.error}"
+                                errCount++
+                                lastErr = result.error
                                 copyList[i] = copyList[i].copy(status = "오류")
                             } else {
                                 copyList[i] = copyList[i].copy(lufs = result.lufs, peak = result.peak)
                             }
                             tracks = recalcTargets(copyList.toList(), thresholdLu)
                         }
-                        progressText = "측정 완료! 최고 음량에 맞춰 대상이 지정되었습니다."
+                        progressText = if (errCount > 0) {
+                            "측정 실패 ${errCount}곡 · 오류: $lastErr"
+                        } else {
+                            "측정 완료! 최고 음량에 맞춰 대상이 지정되었습니다."
+                        }
                         isProcessing = false
                     }
                 },
