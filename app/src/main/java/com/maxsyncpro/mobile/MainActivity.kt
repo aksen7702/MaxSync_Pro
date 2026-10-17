@@ -1,9 +1,14 @@
 package com.maxsync.pro
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -33,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Locale
 
@@ -47,48 +53,51 @@ data class AudioTrackItem(
     var needsBoost: Boolean = false,
     var isReference: Boolean = false,
     var status: String = "대기중",
-    var outputPath: String? = null
+    var isDone: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme(
-                colorScheme = darkColorScheme(
-                    background = Color(0xFF090D16),
-                    surface = Color(0xFF111827),
-                    primary = Color(0xFFF59E0B),
-                    secondary = Color(0xFF6366F1)
-                )
-            ) {
-                MaxSyncProStudioApp()
+        try {
+            setContent {
+                MaterialTheme(
+                    colorScheme = darkColorScheme(
+                        background = Color(0xFF090D16),
+                        surface = Color(0xFF111827),
+                        primary = Color(0xFFF59E0B),
+                        secondary = Color(0xFF6366F1)
+                    )
+                ) {
+                    MaxSyncProAppView()
+                }
             }
+        } catch (e: Throwable) {
+            Toast.makeText(this, "실행 초기화 오류: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 }
 
 @Composable
-fun MaxSyncProStudioApp() {
+fun MaxSyncProAppView() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var tracks by remember { mutableStateOf(listOf<AudioTrackItem>()) }
     var thresholdLu by remember { mutableFloatStateOf(1.0f) }
     var selectedBitrate by remember { mutableStateOf("320k") }
-    var useLimiter by remember { mutableStateOf(true) }
     var isProcessing by remember { mutableStateOf(false) }
-    var progressText by remember { mutableStateOf("EBU R128 정식 엔진 준비됨") }
+    var progressText by remember { mutableStateOf("EBU R128 오디오 마스터 엔진 준비됨") }
     var targetLufs by remember { mutableStateOf<Double?>(null) }
 
-    fun recalculateTargets(list: List<AudioTrackItem>, threshold: Float): List<AudioTrackItem> {
+    fun recalcTargets(list: List<AudioTrackItem>, threshold: Float): List<AudioTrackItem> {
         val measured = list.filter { it.lufs != null }
         if (measured.isEmpty()) {
             targetLufs = null
             return list
         }
-        val maxTrack = measured.maxByOrNull { it.lufs!! }!!
-        val maxVal = maxTrack.lufs!!
+        val maxVal = measured.maxOf { it.lufs!! }
+        val maxTrack = measured.first { it.lufs == maxVal }
         targetLufs = maxVal
 
         return list.map { item ->
@@ -103,7 +112,7 @@ fun MaxSyncProStudioApp() {
                     gainDb = if (need) diff else 0.0,
                     needsBoost = need,
                     status = when {
-                        item.status == "증폭완료" -> "증폭완료"
+                        item.isDone -> "증폭완료"
                         isRef -> "최고음량 기준곡"
                         need -> "증폭 필요"
                         else -> "통과 (Skip)"
@@ -113,7 +122,7 @@ fun MaxSyncProStudioApp() {
         }
     }
 
-    val filePickerLauncher = rememberLauncherForActivityResult(
+    val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
@@ -126,8 +135,8 @@ fun MaxSyncProStudioApp() {
                     sizeMb = meta.second
                 )
             }
-            tracks = recalculateTargets(tracks + newItems, thresholdLu)
-            progressText = "${tracks.size}곡이 목록에 등록되었습니다."
+            tracks = recalcTargets(tracks + newItems, thresholdLu)
+            progressText = "${tracks.size}곡 목록 등록 완료"
         }
     }
 
@@ -139,6 +148,7 @@ fun MaxSyncProStudioApp() {
             .background(Color(0xFF090D16))
             .padding(14.dp)
     ) {
+        // 헤더
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -165,8 +175,8 @@ fun MaxSyncProStudioApp() {
                 }
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
-                    Text(text = "MaxSync Pro", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
-                    Text(text = "EBU R128 마스터 워크스페이스", color = Color(0xFF9CA3AF), fontSize = 11.sp)
+                    Text("MaxSync Pro", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
+                    Text("EBU R128 오디오 마스터", color = Color(0xFF9CA3AF), fontSize = 11.sp)
                 }
             }
 
@@ -177,24 +187,30 @@ fun MaxSyncProStudioApp() {
                     .border(1.dp, Color(0xFF10B981), CircleShape)
                     .padding(horizontal = 10.dp, vertical = 4.dp)
             ) {
-                Text(text = if (isProcessing) "작업 실행중..." else "엔진 준비됨", color = Color(0xFF6EE7B7), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (isProcessing) "처리 중..." else "정상 구동됨",
+                    color = Color(0xFF6EE7B7),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
+        // 추가 & 초기화
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
-                onClick = { filePickerLauncher.launch(arrayOf("audio/*")) },
+                onClick = { filePicker.launch(arrayOf("audio/*")) },
                 enabled = !isProcessing,
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
             ) {
-                Text("+ MP3 파일 선택 추가", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text("+ 오디오 파일 추가", fontWeight = FontWeight.Bold, fontSize = 13.sp)
             }
 
             OutlinedButton(
@@ -206,12 +222,13 @@ fun MaxSyncProStudioApp() {
                 enabled = !isProcessing && tracks.isNotEmpty(),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Text("전체 비우기", color = Color(0xFFF87171), fontSize = 12.sp)
+                Text("비우기", color = Color(0xFFF87171), fontSize = 12.sp)
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // 1단계 / 2단계 액션 버튼
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -220,17 +237,17 @@ fun MaxSyncProStudioApp() {
                 onClick = {
                     scope.launch {
                         isProcessing = true
-                        val updated = tracks.toMutableList()
-                        for (i in updated.indices) {
-                            progressText = "[1단계 측정중] ${i + 1}/${updated.size}: ${updated[i].name}"
-                            updated[i] = updated[i].copy(status = "측정중...")
-                            tracks = updated.toList()
+                        val copyList = tracks.toMutableList()
+                        for (i in copyList.indices) {
+                            progressText = "음량 측정 중 (${i + 1}/${copyList.size}): ${copyList[i].name}"
+                            copyList[i] = copyList[i].copy(status = "측정중...")
+                            tracks = copyList.toList()
 
-                            val result = measureLufsWithFFmpeg(context, updated[i].uri)
-                            updated[i] = updated[i].copy(lufs = result.first, peak = result.second)
-                            tracks = recalculateTargets(updated.toList(), thresholdLu)
+                            val result = measureLufs(context, copyList[i].uri)
+                            copyList[i] = copyList[i].copy(lufs = result.first, peak = result.second)
+                            tracks = recalcTargets(copyList.toList(), thresholdLu)
                         }
-                        progressText = "EBU R128 측정 완료! 최고 음량 기준곡 지정됨."
+                        progressText = "측정 완료! 최고 음량에 맞춰 대상이 지정되었습니다."
                         isProcessing = false
                     }
                 },
@@ -239,30 +256,36 @@ fun MaxSyncProStudioApp() {
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5), disabledContainerColor = Color(0xFF1F2937))
             ) {
-                Text("1단계: LUFS 음량 측정", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text("1단계: LUFS 측정", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             }
 
             Button(
                 onClick = {
                     scope.launch {
                         isProcessing = true
-                        val updated = tracks.toMutableList()
-                        var doneCount = 0
-                        for (i in updated.indices) {
-                            val item = updated[i]
-                            if (item.needsBoost && item.gainDb > 0) {
-                                progressText = "[2단계 증폭중] ${item.name}"
-                                val outPath = boostTrackWithFFmpeg(context, item.uri, item.name, item.gainDb, selectedBitrate, useLimiter)
-                                if (outPath != null) {
-                                    doneCount++
-                                    updated[i] = item.copy(lufs = targetLufs, gainDb = 0.0, needsBoost = false, status = "증폭완료", outputPath = outPath)
+                        val copyList = tracks.toMutableList()
+                        var done = 0
+                        for (i in copyList.indices) {
+                            val itm = copyList[i]
+                            if (itm.needsBoost && itm.gainDb > 0) {
+                                progressText = "증폭 인코딩 중: ${itm.name} (+${String.format(Locale.US, "%.1f", itm.gainDb)}dB)"
+                                val ok = boostAndSaveTrack(context, itm.uri, itm.name, itm.gainDb, selectedBitrate)
+                                if (ok) {
+                                    done++
+                                    copyList[i] = itm.copy(
+                                        lufs = targetLufs,
+                                        gainDb = 0.0,
+                                        needsBoost = false,
+                                        status = "증폭완료",
+                                        isDone = true
+                                    )
                                 } else {
-                                    updated[i] = item.copy(status = "오류")
+                                    copyList[i] = itm.copy(status = "오류")
                                 }
-                                tracks = updated.toList()
+                                tracks = copyList.toList()
                             }
                         }
-                        progressText = "일괄 증폭 완료! ($doneCount 곡 저장됨)"
+                        progressText = "일괄 증폭 완료! ($done곡 내장메모리 Music/MaxSync_Output 저장됨)"
                         isProcessing = false
                     }
                 },
@@ -271,12 +294,13 @@ fun MaxSyncProStudioApp() {
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706), disabledContainerColor = Color(0xFF1F2937))
             ) {
-                Text("2단계: 일괄 증폭 ($boostCount 곡)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text("2단계: 일괄 증폭 ($boostCount)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
+        // 옵션 및 타겟 카드
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -291,30 +315,30 @@ fun MaxSyncProStudioApp() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text("최고 음량 기준 (Target LUFS)", color = Color(0xFFFBBF24), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("최고 음량 기준 (Target LUFS)", color = Color(0xFFFBBF24), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Text(
                         text = if (targetLufs != null) String.format(Locale.US, "%.1f LUFS", targetLufs) else "--.- LUFS",
                         color = Color.White,
-                        fontSize = 22.sp,
+                        fontSize = 20.sp,
                         fontWeight = FontWeight.ExtraBold
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("증폭 필요 / 전체", color = Color(0xFF9CA3AF), fontSize = 11.sp)
-                    Text(text = "${boostCount}곡 / ${tracks.size}곡", color = Color(0xFF34D399), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text("증폭 대상 / 전체", color = Color(0xFF9CA3AF), fontSize = 11.sp)
+                    Text("${boostCount}곡 / ${tracks.size}곡", color = Color(0xFF34D399), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            Text(text = "판정 임계값: ${String.format(Locale.US, "%.1f", thresholdLu)} LU 이상 차이날 때", color = Color(0xFFD1D5DB), fontSize = 12.sp)
+            Text("판정 임계값: ${String.format(Locale.US, "%.1f", thresholdLu)} LU 이상 차이날 때만 증폭", color = Color(0xFFD1D5DB), fontSize = 12.sp)
             Slider(
                 value = thresholdLu,
                 onValueChange = {
                     thresholdLu = it
-                    tracks = recalculateTargets(tracks, thresholdLu)
+                    tracks = recalcTargets(tracks, thresholdLu)
                 },
-                valueRange = 0.2f..5.0f,
+                valueRange = 0.2f..4.0f,
                 colors = SliderDefaults.colors(thumbColor = Color(0xFFF59E0B), activeTrackColor = Color(0xFFF59E0B))
             )
 
@@ -323,6 +347,7 @@ fun MaxSyncProStudioApp() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Text("출력 비트레이트", color = Color(0xFF9CA3AF), fontSize = 11.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("320k", "256k", "192k").forEach { br ->
                         val active = (selectedBitrate == br)
@@ -332,27 +357,22 @@ fun MaxSyncProStudioApp() {
                                 .background(if (active) Color(0xFF374151) else Color(0xFF1F2937))
                                 .border(1.dp, if (active) Color(0xFFF59E0B) else Color.Transparent, RoundedCornerShape(8.dp))
                                 .clickable { selectedBitrate = br }
-                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
-                            Text(text = br, color = if (active) Color(0xFFFBBF24) else Color(0xFF9CA3AF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text(br, color = if (active) Color(0xFFFBBF24) else Color(0xFF9CA3AF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("클리핑 방지", color = Color(0xFFD1D5DB), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Switch(checked = useLimiter, onCheckedChange = { useLimiter = it })
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        Text(text = progressText, color = Color(0xFF93C5FD), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 4.dp))
+        Text(progressText, color = Color(0xFF93C5FD), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 4.dp))
 
         Spacer(modifier = Modifier.height(6.dp))
 
+        // 곡 리스트
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -368,14 +388,63 @@ fun MaxSyncProStudioApp() {
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("오디오 곡 목록이 비어 있습니다.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("상단의 [+ MP3 파일 선택 추가] 버튼을 누르세요.", color = Color(0xFF6B7280), fontSize = 11.sp)
+                    Text("등록된 곡이 없습니다.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("+ 오디오 파일 추가 버튼을 눌러주세요.", color = Color(0xFF6B7280), fontSize = 11.sp)
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(tracks) { index, item ->
-                        TrackRowCard(index = index + 1, item = item)
+                    itemsIndexed(tracks) { idx, itm ->
+                        val bColor = when {
+                            itm.isReference -> Color(0xFFF59E0B)
+                            itm.needsBoost -> Color(0xFF6366F1)
+                            itm.isDone -> Color(0xFF10B981)
+                            else -> Color(0xFF1F2937)
+                        }
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF1F2937).copy(alpha = 0.6f))
+                                .border(1.dp, bColor, RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("#${idx + 1}", color = Color(0xFF9CA3AF), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(itm.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                val bg = when {
+                                    itm.isReference -> Color(0xFF78350F)
+                                    itm.needsBoost -> Color(0xFF312E81)
+                                    itm.isDone -> Color(0xFF064E3B)
+                                    else -> Color(0xFF374151)
+                                }
+                                val txt = when {
+                                    itm.isReference -> "👑 기준곡"
+                                    itm.needsBoost -> "+${String.format(Locale.US, "%.1f", itm.gainDb)}dB"
+                                    else -> itm.status
+                                }
+                                Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(bg).padding(horizontal = 8.dp, vertical = 3.dp)) {
+                                    Text(txt, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("크기: ${itm.sizeMb} MB", color = Color(0xFF9CA3AF), fontSize = 11.sp)
+                                Text(
+                                    if (itm.lufs != null) String.format(Locale.US, "%.1f LUFS", itm.lufs) else "미측정",
+                                    color = if (itm.lufs != null) Color(0xFFFCD34D) else Color(0xFF6B7280),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -383,137 +452,98 @@ fun MaxSyncProStudioApp() {
     }
 }
 
-@Composable
-fun TrackRowCard(index: Int, item: AudioTrackItem) {
-    val borderColor = when {
-        item.isReference -> Color(0xFFF59E0B)
-        item.needsBoost -> Color(0xFF6366F1)
-        item.status == "증폭완료" -> Color(0xFF10B981)
-        else -> Color(0xFF1F2937)
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF1F2937).copy(alpha = 0.6f))
-            .border(1.dp, borderColor, RoundedCornerShape(12.dp))
-            .padding(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                Text(text = "#$index", color = Color(0xFF9CA3AF), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(text = item.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-
-            val badgeBg = when {
-                item.isReference -> Color(0xFF78350F)
-                item.needsBoost -> Color(0xFF312E81)
-                item.status == "증폭완료" -> Color(0xFF064E3B)
-                else -> Color(0xFF374151)
-            }
-            val badgeText = when {
-                item.isReference -> "👑 최고음량 기준곡"
-                item.needsBoost -> "⚡ +${String.format(Locale.US, "%.1f", item.gainDb)} dB"
-                else -> item.status
-            }
-
-            Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(badgeBg).padding(horizontal = 8.dp, vertical = 3.dp)) {
-                Text(text = badgeText, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(text = "용량: ${item.sizeMb} MB", color = Color(0xFF9CA3AF), fontSize = 11.sp)
-            Text(
-                text = if (item.lufs != null) String.format(Locale.US, "%.1f LUFS | 피크: %.1f dBTP", item.lufs, item.peak ?: -1.0) else "측정 전",
-                color = if (item.lufs != null) Color(0xFFFCD34D) else Color(0xFF6B7280),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
-
 fun getFileMeta(context: Context, uri: Uri): Pair<String, String> {
-    var name = "audio_track.mp3"
+    var name = "track_${System.currentTimeMillis()}.mp3"
     var sizeStr = "0.0"
-    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-        if (cursor.moveToFirst()) {
-            if (nameIdx >= 0) name = cursor.getString(nameIdx) ?: name
-            if (sizeIdx >= 0) {
-                val bytes = cursor.getLong(sizeIdx)
-                sizeStr = String.format(Locale.US, "%.1f", bytes / (1024.0 * 1024.0))
+    try {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (cursor.moveToFirst()) {
+                if (nIdx >= 0) name = cursor.getString(nIdx) ?: name
+                if (sIdx >= 0) {
+                    val bytes = cursor.getLong(sIdx)
+                    sizeStr = String.format(Locale.US, "%.1f", bytes / (1024.0 * 1024.0))
+                }
             }
         }
-    }
+    } catch (_: Exception) {}
     return Pair(name, sizeStr)
 }
 
-suspend fun measureLufsWithFFmpeg(context: Context, uri: Uri): Pair<Double, Double> = withContext(Dispatchers.IO) {
-    val tempFile = copyUriToTempFile(context, uri, "measure_temp.mp3") ?: return@withContext Pair(-16.0, -1.0)
-    val cmd = "-i \"${tempFile.absolutePath}\" -filter_complex ebur128=peak=true -f null -"
-    val session = FFmpegKit.execute(cmd)
-    val logs = session.allLogsAsString ?: ""
-    tempFile.delete()
+suspend fun measureLufs(context: Context, uri: Uri): Pair<Double, Double> = withContext(Dispatchers.IO) {
+    val temp = File(context.cacheDir, "meas_${System.currentTimeMillis()}.mp3")
+    try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(temp).use { output -> input.copyTo(output) }
+        }
+        val cmd = "-i \"${temp.absolutePath}\" -filter_complex ebur128=peak=true -f null -"
+        val session = FFmpegKit.execute(cmd)
+        val logs = session.allLogsAsString ?: ""
 
-    val iRegex = Regex("""I:\s*(-?\d+(\.\d+)?)\s*LUFS""")
-    val tpRegex = Regex("""Peak:\s*(-?\d+(\.\d+)?)\s*dBFS""")
+        val iRegex = Regex("""I:\s*(-?\d+(\.\d+)?)\s*LUFS""")
+        val tpRegex = Regex("""Peak:\s*(-?\d+(\.\d+)?)\s*dBFS""")
 
-    val lufs = iRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -18.0
-    val peak = tpRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -1.5
-    Pair(lufs, peak)
+        val lufs = iRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -16.0
+        val peak = tpRegex.findAll(logs).lastOrNull()?.groupValues?.get(1)?.toDoubleOrNull() ?: -1.0
+        Pair(lufs, peak)
+    } catch (e: Exception) {
+        Pair(-16.0, -1.0)
+    } finally {
+        temp.delete()
+    }
 }
 
-suspend fun boostTrackWithFFmpeg(
+suspend fun boostAndSaveTrack(
     context: Context,
     uri: Uri,
-    fileName: String,
+    name: String,
     gainDb: Double,
-    bitrate: String,
-    limiter: Boolean
-): String? = withContext(Dispatchers.IO) {
-    val tempIn = copyUriToTempFile(context, uri, "boost_in.mp3") ?: return@withContext null
-    val outDir = File(context.getExternalFilesDir(null), "MaxSync_Output")
-    if (!outDir.exists()) outDir.mkdirs()
+    bitrate: String
+): Boolean = withContext(Dispatchers.IO) {
+    val tempIn = File(context.cacheDir, "in_${System.currentTimeMillis()}.mp3")
+    val tempOut = File(context.cacheDir, "out_${System.currentTimeMillis()}.mp3")
+    try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(tempIn).use { output -> input.copyTo(output) }
+        }
 
-    val outFile = File(outDir, "MaxSync_$fileName")
-    val filter = if (limiter) {
-        "volume=${String.format(Locale.US, "%.2f", gainDb)}dB,alimiter=limit=-1.0dB:level=false"
-    } else {
-        "volume=${String.format(Locale.US, "%.2f", gainDb)}dB"
-    }
+        val filter = "volume=${String.format(Locale.US, "%.2f", gainDb)}dB,alimiter=limit=-1.0dB:level=false"
+        val cmd = "-y -i \"${tempIn.absolutePath}\" -af \"$filter\" -c:a libmp3lame -b:a $bitrate \"${tempOut.absolutePath}\""
+        val session = FFmpegKit.execute(cmd)
 
-    val cmd = "-y -i \"${tempIn.absolutePath}\" -af \"$filter\" -c:a libmp3lame -b:a $bitrate \"${outFile.absolutePath}\""
-    val session = FFmpegKit.execute(cmd)
-    tempIn.delete()
-
-    if (session.returnCode.isValueSuccess && outFile.exists()) {
-        outFile.absolutePath
-    } else {
-        null
+        if (session.returnCode.isValueSuccess && tempOut.exists()) {
+            saveToMusicStorage(context, tempOut, "MaxSync_$name")
+            true
+        } else {
+            false
+        }
+    } catch (e: Exception) {
+        false
+    } finally {
+        tempIn.delete()
+        tempOut.delete()
     }
 }
 
-fun copyUriToTempFile(context: Context, uri: Uri, tempName: String): File? {
-    return try {
-        val tempFile = File(context.cacheDir, tempName)
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(tempFile).use { output ->
-                input.copyTo(output)
-            }
+fun saveToMusicStorage(context: Context, sourceFile: File, displayName: String) {
+    val values = ContentValues().apply {
+        put(MediaStore.Audio.Media.DISPLAY_NAME, displayName)
+        put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/MaxSync_Output")
+            put(MediaStore.Audio.Media.IS_PENDING, 1)
         }
-        tempFile
-    } catch (e: Exception) {
-        null
+    }
+
+    val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values) ?: return
+    context.contentResolver.openOutputStream(uri)?.use { out ->
+        FileInputStream(sourceFile).use { inp -> inp.copyTo(out) }
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        values.clear()
+        values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+        context.contentResolver.update(uri, values, null, null)
     }
 }
