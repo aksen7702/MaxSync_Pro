@@ -200,6 +200,13 @@ fun MaxSyncProAppView() {
             }
         }
 
+        Text(
+            "기기 ABI: ${Build.SUPPORTED_ABIS.joinToString(", ")} · Android ${Build.VERSION.SDK_INT}",
+            color = Color(0xFF6B7280),
+            fontSize = 10.sp,
+            modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+        )
+
         Spacer(modifier = Modifier.height(10.dp))
 
         // 추가 & 초기화
@@ -243,7 +250,7 @@ fun MaxSyncProAppView() {
                         isProcessing = true
                         val copyList = tracks.toMutableList()
                         var errCount = 0
-                        var lastErr: String? = null
+                        var firstErr: String? = null
                         for (i in copyList.indices) {
                             progressText = "음량 측정 중 (${i + 1}/${copyList.size}): ${copyList[i].name}"
                             copyList[i] = copyList[i].copy(status = "측정중...")
@@ -252,7 +259,7 @@ fun MaxSyncProAppView() {
                             val result = measureLufs(context, copyList[i].uri)
                             if (result.error != null) {
                                 errCount++
-                                lastErr = result.error
+                                if (firstErr == null) firstErr = result.error
                                 copyList[i] = copyList[i].copy(status = "오류")
                             } else {
                                 copyList[i] = copyList[i].copy(lufs = result.lufs, peak = result.peak)
@@ -260,7 +267,7 @@ fun MaxSyncProAppView() {
                             tracks = recalcTargets(copyList.toList(), thresholdLu)
                         }
                         progressText = if (errCount > 0) {
-                            "측정 실패 ${errCount}곡 · 오류: $lastErr"
+                            "측정 실패 ${errCount}곡 · 오류: $firstErr"
                         } else {
                             "측정 완료! 최고 음량에 맞춰 대상이 지정되었습니다."
                         }
@@ -469,6 +476,20 @@ fun MaxSyncProAppView() {
     }
 }
 
+// 예외의 원인 체인을 사람이 읽을 수 있는 문자열로 변환
+fun describeError(t: Throwable): String {
+    val sb = StringBuilder()
+    var cur: Throwable? = t
+    var depth = 0
+    while (cur != null && depth < 4) {
+        if (depth > 0) sb.append(" | ")
+        sb.append(cur.javaClass.simpleName).append(": ").append(cur.message)
+        cur = cur.cause
+        depth++
+    }
+    return sb.toString()
+}
+
 fun getFileMeta(context: Context, uri: Uri): Pair<String, String> {
     var name = "track_${System.currentTimeMillis()}.mp3"
     var sizeStr = "0.0"
@@ -513,7 +534,7 @@ suspend fun measureLufs(context: Context, uri: Uri): LufsResult = withContext(Di
         }
     } catch (t: Throwable) {
         // FFmpegKit는 네이티브 로딩 실패 시 java.lang.Error를 던지므로 Throwable로 잡아야 크래시를 막을 수 있음
-        LufsResult(-16.0, -1.0, "${t.javaClass.simpleName}: ${t.message}")
+        LufsResult(-16.0, -1.0, describeError(t))
     } finally {
         temp.delete()
     }
@@ -545,7 +566,7 @@ suspend fun boostAndSaveTrack(
             "인코딩 실패 (code=${session.returnCode}): $tail"
         }
     } catch (t: Throwable) {
-        "${t.javaClass.simpleName}: ${t.message}"
+        describeError(t)
     } finally {
         tempIn.delete()
         tempOut.delete()

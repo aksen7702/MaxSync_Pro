@@ -50,6 +50,10 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        // FFmpegKit 네이티브(.so) 라이브러리 로딩 안정성을 위해 APK 설치 시 추출하도록 설정
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 
